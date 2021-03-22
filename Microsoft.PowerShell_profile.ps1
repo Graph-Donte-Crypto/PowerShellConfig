@@ -54,16 +54,30 @@ function Prompt {
     return " # "
 }
 
-$ChocolateyProfile = "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
-if (Test-Path($ChocolateyProfile)) {
-  Import-Module "$ChocolateyProfile"
-}
-
 function FN-Enable {
 	Remove-PSReadLineKeyHandler -Chord '@'
 }
 function FN-Disable {
 	Set-PSReadLineKeyHandler -Chord '@' -ScriptBlock {}
 }
+
+
+function ProfileOpen {
+	Start-Process -Path $PROFILE -Verb Open
+}
+function ProfileOpenDirectory {
+	Start-Process -Path (Get-Item $PROFILE).Directory.FullName -Verb Open
+}
+
+function SetTitle {
+	param ([System.String]$Title)
+	$host.ui.RawUI.WindowTitle = $Title
+}
+
+function Open {
+	param ([System.String]$Path)
+	Start-Process -Path $Path -Verb Open
+}
+
 
 Set-PSReadLineKeyHandler -Chord '@' -ScriptBlock {}

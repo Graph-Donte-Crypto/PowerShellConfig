@@ -81,3 +81,51 @@ function Open {
 
 
 Set-PSReadLineKeyHandler -Chord '@' -ScriptBlock {}
+
+function SyncFolders {
+	param (
+	  [string]$Source,
+	  [string]$Target
+	)		
+	
+	$path_splitter = $([System.IO.Path]::DirectorySeparatorChar)
+	$no_path_splitter = ''
+	if ($path_splitter -eq '\') {
+		$no_path_splitter = '/'
+	} else {
+		$no_path_splitter = '\'
+	}
+	
+	$Source = $($Source + '/').Replace($no_path_splitter, $path_splitter)
+	$Target = $($Target + '/').Replace($no_path_splitter, $path_splitter)
+	
+	echo $("Source: " + $Source)
+	echo $("Target: " + $Target)
+	
+	$map = @{}
+	
+	Get-ChildItem -Path $Target -Recurse | ForEach-Object {
+		$current_file = $_.FullName.Substring($Target.Length)
+		$current_time = $_.LastWriteTime
+		$map.Add($current_file, $current_time)
+	}
+	
+	Get-ChildItem -Path $Source -Recurse | ForEach-Object {
+		$current_file = $_.FullName.Substring($Source.Length)
+		$current_time = $_.LastWriteTime
+		if ($map.ContainsKey($current_file)) {
+			$map_time = $map.Item($current_file)
+			if ($map_time -lt $current_time) {
+				$map.Item($current_file) = $current_time
+				echo $($current_file + " has new version: old [" + $map_time.ToString() + "], new [" + $current_file.ToString() + "]")
+				Copy-Item $($Source + $current_file) -Destination $($Target + $current_file) -Force
+			}
+		}
+		else {
+			$map.Add($current_file, $current_time)
+			echo $($current_file + " is new file")
+			Copy-Item $($Source + $current_file) -Destination $($Target + $current_file) -Force
+		}
+	}
+	
+}

@@ -192,15 +192,20 @@ function Tcp-ReceiveUTF8 {
     }
 }
 
-function Tcp-ReceiveBytes {
+function Tcp-ReceiveFile {
     param ( 
         [Parameter(Mandatory=$true, Position=1)]
-        [int] $Port
+        [int] $Port,
+        [Parameter(Mandatory=$true, Position=1)]
+        [string] $File
     )
     process {
+        $stream = [System.IO.File]::Create($File)
         Tcp-ReceiveBytesArray -Port $Port | % {
-            Write-Output $($_[0] -as [byte[]])
+            $bytes = $($_[0] -as [byte[]])
+            $stream.Write($bytes, 0, $bytes.Count)
         }
+        $stream.Close()
     }
 }
 

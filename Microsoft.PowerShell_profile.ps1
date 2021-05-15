@@ -129,3 +129,149 @@ function SyncFolders {
 	}
 	
 }
+
+function Tcp-SendMessage {
+	param ( 
+		[Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()] 
+        [string] $Ip, 
+        [int] $Port,
+        [Parameter(Mandatory=$true, Position=0, ParameterSetName="string")]
+        [ValidateNotNullOrEmpty()] 
+        [string]$Message,
+        [Parameter(Mandatory=$true, Position=0, ParameterSetName="bytes")]
+        [byte[]]$Bytes
+    )
+    process {
+
+        if ($PSCmdlet.ParameterSetName -eq 'string') {
+            Tcp-SendMessage -Ip $Ip -Port $Port -Bytes $([System.Text.Encoding]::UTF8.GetBytes($Message))
+            return 
+        }
+
+        try {
+            if ($Ip.Contains(':')) {
+			    $parts = $Ip.Split(':')
+			    $Ip = $parts[0]
+			    if ($Port -eq 0) {
+				    $Port = $parts[1]
+			    }
+		    }
+
+            $Ip = [System.Net.Dns]::GetHostAddresses($Ip)[0].IPAddressToString
+
+            #$Address = [System.Net.IPAddress]::Parse($Ip[0].IPAddressToString) 
+            $Socket = New-Object System.Net.Sockets.TCPClient($Ip, $Port) 
+    
+            $Stream = $Socket.GetStream() 
+            $Writer = New-Object System.IO.StreamWriter($Stream)
+
+            $Writer.BaseStream.Write($Bytes)
+    
+            $Stream.Close()
+            $Socket.Close()
+        }
+        catch {
+            "Tcp-SendMessage failed with: `n" + $Error[0]
+        }
+        finally {
+            $Socket.Close()
+        }
+    }
+}
+
+function Tcp-ReceiveUTF8 {
+    param ( 
+        [Parameter(Mandatory=$true, Position=1)]
+        [int] $Port
+    )
+    process {
+        Tcp-ReceiveBytesArray -Port $Port | % {
+            Write-Output $([System.Text.Encoding]::UTF8.GetString($($_[0] -as [byte[]])))
+        }
+    }
+}
+
+function Tcp-ReceiveBytes {
+    param ( 
+        [Parameter(Mandatory=$true, Position=1)]
+        [int] $Port
+    )
+    process {
+        Tcp-ReceiveBytesArray -Port $Port | % {
+            Write-Output $($_[0] -as [byte[]])
+        }
+    }
+}
+
+function Tcp-ReceiveBytesArray {
+    param ( 
+        [Parameter(Mandatory=$true, Position=1)]
+        [int] $Port
+    ) 
+    process {
+        try { 
+            $endpoint_v4 = new-object System.Net.IPEndPoint([ipaddress]::Any, $Port) 
+            $endpoint_v6 = new-object System.Net.IPEndPoint([ipaddress]::IPv6Any, $Port) 
+
+            $listener_v4 = new-object System.Net.Sockets.TcpListener $endpoint_v4
+            $listener_v6 = new-object System.Net.Sockets.TcpListener $endpoint_v6
+
+            $listener_v4.start() 
+            $listener_v6.start() 
+
+            $task_v4 = $listener_v4.AcceptTcpClientAsync()
+            $task_v6 = $listener_v6.AcceptTcpClientAsync()
+
+            $connection = $null
+            $current_listener = $null
+
+            while ($true) {
+                if ($task_v4.IsCompleted) {
+                    $connection = $task_v4.Result
+                    $current_listener = $listener_v4
+                    $listener_v6.Stop()
+                    break
+                }
+                elseif ($task_v6.IsCompleted) {
+                    $connection = $task_v6.Result
+                    $current_listener = $listener_v6
+                    $listener_v4.Stop()
+                    break
+                }
+                else {
+                    sleep 0.033
+                }
+            }
+        
+            $stream = $connection.GetStream() 
+            $bytes = New-Object System.Byte[] $(1024 * 1024)
+            
+            while ($connection.Connected) {
+                $i = $stream.Read($bytes, 0, $bytes.Length)
+                if ($i -gt 0) {
+                    $buffer = ,$($bytes[0..$($i-1)])
+                    $bufferArray = @(1)
+                    $bufferArray[0] = $buffer
+                    Write-Output $bufferArray
+                }
+                else {
+                    break
+                }
+            }
+         
+            $stream.close()
+            $current_listener.stop()
+        }
+        catch {
+            "Tcp-ReceiveMessage failed with: `n" + $_.ToString()
+            Write-Host $_.ScriptStackTrace
+        }
+        finally {
+            $listener_v4.stop() 
+            $listener_v6.stop() 
+        }
+    }
+}
+
+

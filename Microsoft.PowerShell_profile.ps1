@@ -279,4 +279,103 @@ function Tcp-ReceiveBytesArray {
     }
 }
 
+function Pause-Process {
 
+[CmdletBinding()]
+
+    Param (
+        [parameter(Mandatory=$True, ValueFromPipelineByPropertyName=$True)]
+            [alias("OwningProcess")]
+            [int]$ID
+        )
+
+        Begin{
+            # Test to see if this is a running process
+            # Get-Process -ID $ID  <--Throws an error if the process isn't running
+            # Future feature: Do checks to see if we can pause this process.
+            Write-Verbose ("You entered an ID of: $ID")
+
+            if ($ID -le 0) {
+                $Host.UI.WriteErrorLine("ID needs to be a positive integer for this to work")
+                break
+            }
+            #Assign output to variable, check variable in if statement
+            #Variable null if privilege isn't present
+            $privy = whoami /priv
+            $dbpriv = $privy -match "SeDebugPrivilege"
+
+            if (!$dbpriv) {
+            $Host.UI.WriteErrorLine("You do not have debugging privileges to pause any process")
+            break
+            }
+
+            $ProcHandle = (Get-Process -Id $ID).Handle
+            $DebuggerPresent = [IntPtr]::Zero
+            $CallResult = [Kernel32]::CheckRemoteDebuggerPresent($ProcHandle,[ref]$DebuggerPresent)
+                if ($DebuggerPresent) {
+                    $Host.UI.WriteErrorLine("There is already a debugger attached to this process")
+                    break
+                }
+        }
+
+        Process{
+            $PauseResult = [Kernel32]::DebugActiveProcess($ID)
+        }
+
+        End{
+            if ($PauseResult -eq $False) {
+                $Host.UI.WriteErrorLine("Unable to pause process: $ID")
+               } else {
+                    Write-Verbose ("Process $ID was paused")
+                }
+            }
+}
+
+function UnPause-Process {
+
+[CmdletBinding()]
+
+    Param (
+        [parameter(Mandatory=$True, ValueFromPipelineByPropertyName=$True)]
+        [alias("OwningProcess")]
+        [int]$ID
+    )
+
+    Begin{
+        Write-Verbose ("Attempting to unpause PID: $ID")
+         # Test to see if this is a running process
+         # (Get-Process -ID $ID) should throw an error if the process isn't running
+         # Future feature: Do checks to see if we can pause this process.
+         #try { Get-Process -ID $ID }
+         #catch { $Host.UI.WriteErrorLine("This process isn't running") }
+
+         Write-Verbose ("You entered an ID of: $ID")
+
+         if ($ID -le 0) {
+             $Host.UI.WriteErrorLine("ID needs to be a positive integer for this to work")
+             break
+         }
+        
+         #Variable null if privilege isn't present
+         $privy = whoami /priv
+         $dbpriv = $privy -match "SeDebugPrivilege"
+            
+         if (!$dbpriv) {
+            $Host.UI.WriteErrorLine("You do not have debugging privileges to unpause any process")
+            break
+         }
+    }
+
+    Process{
+        #Attempt the unpause
+        $UnPauseResult = [Kernel32]::DebugActiveProcessStop($ID)
+    }
+
+    End{
+        if ($UnPauseResult -eq $False) {
+            $Host.UI.WriteErrorLine("Unable to unpause process $ID. Is it running or gone?")
+        } else {
+            Write-Verbose ("$ID was resumed")
+        }
+    }
+}

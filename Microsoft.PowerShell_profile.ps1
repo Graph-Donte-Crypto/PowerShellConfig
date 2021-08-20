@@ -379,3 +379,8 @@ function UnPause-Process {
         }
     }
 }
+
+function FindCommand {
+	param ($Name)
+	Get-Command -CommandType All | ? {$_.Name.Contains($Name)}
+}

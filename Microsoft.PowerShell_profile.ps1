@@ -63,11 +63,17 @@ function FN-Disable {
 
 
 function ProfileOpen {
-	Start-Process -Path $PROFILE -Verb Open
+	OpenWithNpp $PROFILE
 }
+
+function ProfileGetDirectory {
+	return (Get-Item $PROFILE).Directory.FullName
+}
+
 function ProfileOpenDirectory {
-	Start-Process -Path (Get-Item $PROFILE).Directory.FullName -Verb Open
+	Open $(ProfileGetDirectory)
 }
+
 
 function SetTitle {
 	param ([System.String]$Title)
@@ -79,6 +85,10 @@ function Open {
 	Start-Process -Path $Path -Verb Open
 }
 
+function OpenWithNpp {
+	param ([System.String]$Path)
+	Start-Process -Path 'C:\Program Files (x86)\Notepad++\notepad++.exe' -Args "$Path" -Verb Open
+}
 
 Set-PSReadLineKeyHandler -Chord '@' -ScriptBlock {}
 

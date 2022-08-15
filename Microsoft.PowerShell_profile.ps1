@@ -1,3 +1,141 @@
+function Wait-Task {
+	param (
+		[Parameter(Mandatory, ValueFromPipeline)]
+		[System.Threading.Tasks.Task[]]$task
+	)
+
+	process {
+		while (-not $task.AsyncWaitHandle.WaitOne(40)) { }
+		$task.GetAwaiter().GetResult()
+	}
+}
+
+Set-Alias -Name wait -Value Wait-Task
+
+Add-Type -TypeDefinition @"
+namespace System.IO
+{
+	using System;
+	using System.IO;
+	using System.Threading;
+	using System.Threading.Tasks;
+	public class ThrottledStream : Stream
+	{
+		public const double Infinite = 0;
+		private readonly Stream BaseStream;
+		private double MaximumBytesPerSecond = 0;
+		private long ReadedBytes = 0;
+		private long WritedBytes = 0;
+		private long StartTimeMs = 0;
+
+		protected long CurrentMilliseconds => Environment.TickCount;
+
+		public override bool CanRead => BaseStream.CanRead;
+		public override bool CanSeek => BaseStream.CanSeek;
+		public override bool CanWrite => BaseStream.CanWrite;
+		public override long Length => BaseStream.Length;
+		public override long Position
+		{
+			get => BaseStream.Position;
+			set => BaseStream.Position = value;
+		}
+		public ThrottledStream(Stream baseStream) : this(baseStream, Infinite) { }
+
+		public ThrottledStream(Stream baseStream, double maximumBytesPerSecond)
+		{
+			if (maximumBytesPerSecond < 0)
+				maximumBytesPerSecond = Infinite;
+
+			BaseStream = baseStream ?? throw new ArgumentNullException("baseStream");
+			MaximumBytesPerSecond = maximumBytesPerSecond;
+			StartTimeMs = CurrentMilliseconds;
+		}
+
+		public override void Flush() => BaseStream.Flush();
+		public new Task FlushAsync() => BaseStream.FlushAsync();
+		public override Task FlushAsync(CancellationToken cancellationToken) => BaseStream.FlushAsync(cancellationToken);
+
+		public override int Read(byte[] buffer, int offset, int count) {
+
+			var ncount = Throttle(ReadedBytes, count).GetAwaiter().GetResult();
+			ReadedBytes += ncount;
+			
+			return BaseStream.Read(buffer, offset, ncount);
+		}
+
+		public async new Task<int> ReadAsync(byte[] buffer, int offset, int count) {
+			
+			count = await Throttle(ReadedBytes, count);
+			ReadedBytes += count;
+
+			return await BaseStream.ReadAsync(buffer, offset, count).ConfigureAwait(false);
+		}
+
+		public async override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) {
+			
+			count = await Throttle(ReadedBytes, count);
+			ReadedBytes += count;
+
+			return await BaseStream.ReadAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
+		}
+
+		public override long Seek(long offset, SeekOrigin origin) => BaseStream.Seek(offset, origin);
+		public override void SetLength(long value) => BaseStream.SetLength(value);
+
+		public override void Write(byte[] buffer, int offset, int count) {
+			
+			count = Throttle(WritedBytes, count).GetAwaiter().GetResult();
+			WritedBytes += count;
+
+			BaseStream.Write(buffer, offset, count);
+		}
+		
+		public async new Task WriteAsync(byte[] buffer, int offset, int count) {
+			
+			count = await Throttle(WritedBytes, count);
+			WritedBytes += count;
+
+			await BaseStream.WriteAsync(buffer, offset, count).ConfigureAwait(false);
+		}
+		
+		public async override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) {
+			
+			count = await Throttle(WritedBytes, count);
+			WritedBytes += count;
+
+			await BaseStream.WriteAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
+		}
+		
+		public override string ToString() => BaseStream.ToString();
+
+		public double AvailableBytes => System.Math.Floor(((CurrentMilliseconds - StartTimeMs) / 1000.0) * MaximumBytesPerSecond);
+
+		protected async Task<int> Throttle(long totalProcessed, int expectedBytes) {
+			if (MaximumBytesPerSecond == Infinite)
+				return expectedBytes;
+
+			var bytesToRead = await ThrottleCore(totalProcessed, (long)expectedBytes);
+
+			if ( (long)System.Int32.MaxValue < bytesToRead)
+				return System.Int32.MaxValue;
+			else 
+				return (int)bytesToRead;
+		}
+
+		protected async Task<long> ThrottleCore(long totalProcessed, long expectedBytes) {
+			var bytesToRead = (long)(AvailableBytes - totalProcessed);
+			
+			if (bytesToRead == 0) {
+				await Task.Delay((int)System.Math.Ceiling(1000.0 / MaximumBytesPerSecond));
+				bytesToRead = await ThrottleCore(totalProcessed, expectedBytes);
+			}
+
+			return System.Math.Min(expectedBytes, bytesToRead);
+		}
+	}
+}
+"@
+
 function ExecutionTime {
 	$history = Get-History -ErrorAction Ignore -Count 1
 	if ($history) {
@@ -32,7 +170,16 @@ function Nothing {
 }
 
 function Prompt {	
-	$current_user = $env:UserName + "@" + $env:UserDomain
+
+	if ($env:UserName) {
+		$current_user = $env:UserName + "@" + $env:UserDomain
+	}
+	elseif ($env:USER) {
+		$current_user = $env:USER + "@" + $env:NAME
+	}
+	else {
+		$current_user = "unknown@UNKNOWN"
+	}
 	Write-Host $current_user -foregroundcolor DarkGreen -nonewline
 	
 	
@@ -41,9 +188,10 @@ function Prompt {
 
 
 	$current_directory = " " + $pwd.path
+	$current_directory = $current_directory.Replace('Microsoft.PowerShell.Core\FileSystem::', '')
 	
-	if (-Not $current_directory.EndsWith('\')) {
-		$current_directory = $current_directory + '\'
+	if (-Not $current_directory.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+		$current_directory = $current_directory + [System.IO.Path]::DirectorySeparatorChar
 	}
 	Write-Host $current_directory  -foregroundcolor Green -nonewline
 	
@@ -51,7 +199,7 @@ function Prompt {
 	Write-Host ""
 	
 	
-    return " # "
+	return " # "
 }
 
 function FN-Enable {
@@ -91,6 +239,8 @@ function OpenWithNpp {
 }
 
 Set-PSReadLineKeyHandler -Chord '@' -ScriptBlock {}
+
+
 
 function SyncFolders {
 	param (
@@ -142,252 +292,265 @@ function SyncFolders {
 
 function Tcp-SendMessage {
 	param ( 
-		[Parameter(Mandatory=$true)]
-        [ValidateNotNullOrEmpty()] 
-        [string] $Ip, 
-        [int] $Port,
-        [Parameter(Mandatory=$true, Position=0, ParameterSetName="string")]
-        [ValidateNotNullOrEmpty()] 
-        [string]$Message,
-        [Parameter(Mandatory=$true, Position=0, ParameterSetName="bytes")]
-        [byte[]]$Bytes
-    )
-    process {
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()] 
+		[string] $Ip,	
+		[int] $Port,
+		[Parameter(Mandatory, Position=0, ParameterSetName="string")]
+		[ValidateNotNullOrEmpty()] 
+		[string]$Message,
+		[Parameter(Mandatory, Position=0, ParameterSetName="bytes")]
+		[byte[]]$Bytes
+	)
+	process {
 
-        if ($PSCmdlet.ParameterSetName -eq 'string') {
-            Tcp-SendMessage -Ip $Ip -Port $Port -Bytes $([System.Text.Encoding]::UTF8.GetBytes($Message))
-            return 
-        }
+		if ($PSCmdlet.ParameterSetName -eq 'string') {
+			Tcp-SendMessage -Ip $Ip -Port $Port -Bytes $([System.Text.Encoding]::UTF8.GetBytes($Message))
+			return 
+		}
 
-        try {
-            if ($Ip.Contains(':')) {
-			    $parts = $Ip.Split(':')
-			    $Ip = $parts[0]
-			    if ($Port -eq 0) {
-				    $Port = $parts[1]
-			    }
-		    }
-
-            $Ip = [System.Net.Dns]::GetHostAddresses($Ip)[0].IPAddressToString
-
-            #$Address = [System.Net.IPAddress]::Parse($Ip[0].IPAddressToString) 
-            $Socket = New-Object System.Net.Sockets.TCPClient($Ip, $Port) 
-    
-            $Stream = $Socket.GetStream() 
-            $Writer = New-Object System.IO.StreamWriter($Stream)
-
-            $Writer.BaseStream.Write($Bytes)
-    
-            $Stream.Close()
-            $Socket.Close()
-        }
-        catch {
-            "Tcp-SendMessage failed with: `n" + $Error[0]
-        }
-        finally {
-            $Socket.Close()
-        }
-    }
+		try {
+			if ($Ip.Contains(':')) {
+				$parts = $Ip.Split(':')
+				$Ip = $parts[0]
+				if ($Port -eq 0) {
+					$Port = $parts[1]
+				}
+			}
+			$Socket = New-Object System.Net.Sockets.TCPClient($Ip, $Port) 
+			$Stream = $Socket.GetStream() 
+			
+			$Stream.Write($Bytes)
+			
+			$Stream.Close()
+			$Socket.Close()
+		}
+		catch {
+			"Tcp-SendMessage failed with: `n" + $Error[0]
+		}
+		finally {
+			$Socket.Close()
+		}
+	}
 }
 
 function Tcp-ReceiveUTF8 {
-    param ( 
-        [Parameter(Mandatory=$true, Position=1)]
-        [int] $Port
-    )
-    process {
-        Tcp-ReceiveBytesArray -Port $Port | % {
-            Write-Output $([System.Text.Encoding]::UTF8.GetString($($_[0] -as [byte[]])))
-        }
-    }
+	param ( 
+		[Parameter(Mandatory=$true, Position=1)]
+		[int] $Port,
+		[Parameter(Position=2)]
+		[double] $bps = 0
+	)
+	process {
+		Tcp-ReceiveBytesArray -Port $Port -bps $bps | % {
+			Write-Output $([System.Text.Encoding]::UTF8.GetString($($_[0] -as [byte[]])))
+		}
+	}
 }
 
 function Tcp-ReceiveFile {
-    param ( 
-        [Parameter(Mandatory=$true, Position=1)]
-        [int] $Port,
-        [Parameter(Mandatory=$true, Position=1)]
-        [string] $File
-    )
-    process {
-        $stream = [System.IO.File]::Create($File)
-        Tcp-ReceiveBytesArray -Port $Port | % {
-            $bytes = $($_[0] -as [byte[]])
-            $stream.Write($bytes, 0, $bytes.Count)
-        }
-        $stream.Close()
-    }
+	param ( 
+		[Parameter(Mandatory, Position=1)]
+		[int] $Port,
+		[Parameter(Mandatory, Position=2)]
+		[string] $File,
+		[Parameter(Position=3)]
+		[double] $bps = 0
+	)
+	process {
+		try {
+			$stream = [System.IO.File]::Create($File)
+			Tcp-ReceiveBytesArray -Port $Port -bps $bps | % {
+				$bytes = $($_[0] -as [byte[]])
+				$stream.Write($bytes, 0, $bytes.Count)
+				$stream.Flush()
+			}
+		}
+		catch {
+			$_
+		}
+		finally {
+			$stream.Close()
+		}
+	}
 }
 
+#todo: create UTF-8 support
 function Tcp-ReceiveBytesArray {
-    param ( 
-        [Parameter(Mandatory=$true, Position=1)]
-        [int] $Port
-    ) 
-    process {
-        try { 
-            $endpoint_v4 = new-object System.Net.IPEndPoint([ipaddress]::Any, $Port) 
-            $endpoint_v6 = new-object System.Net.IPEndPoint([ipaddress]::IPv6Any, $Port) 
+	param ( 
+		[Parameter(Mandatory, Position=1)]
+		[int] $Port,
+		[Parameter(Position=2)]
+		[double] $bps = 0
+	) 
+	process {
+		try { 
+			$endpoint_v4 = new-object System.Net.IPEndPoint([ipaddress]::Any, $Port) 
+			$endpoint_v6 = new-object System.Net.IPEndPoint([ipaddress]::IPv6Any, $Port) 
 
-            $listener_v4 = new-object System.Net.Sockets.TcpListener $endpoint_v4
-            $listener_v6 = new-object System.Net.Sockets.TcpListener $endpoint_v6
+			$listener_v4 = new-object System.Net.Sockets.TcpListener $endpoint_v4
+			$listener_v6 = new-object System.Net.Sockets.TcpListener $endpoint_v6
 
-            $listener_v4.start() 
-            $listener_v6.start() 
+			$listener_v4.start() 
+			$listener_v6.start() 
+			
+			$task_v4 = $listener_v4.AcceptTcpClientAsync()
+			$task_v6 = $listener_v6.AcceptTcpClientAsync()
+			
+			$null = wait $([System.Threading.Tasks.Task]::WhenAny($task_v4, $task_v6))
 
-            $task_v4 = $listener_v4.AcceptTcpClientAsync()
-            $task_v6 = $listener_v6.AcceptTcpClientAsync()
+			$connection, $current_listener = 
+				if ($task_v6.IsCompleted) {
+					$task_v6.Result, $listener_v6
+				} else {
+					$task_v4.Result, $listener_v4
+				}
+				
+			$listener_v4.Stop()
+			$listener_v6.Stop()
 
-            $connection = $null
-            $current_listener = $null
+			$stream = $connection.GetStream() 
+			$throttledStream = [System.IO.ThrottledStream]::new($stream, $bps)
+			$bytes = New-Object System.Byte[] $(1024 * 1024)
 
-            while ($true) {
-                if ($task_v4.IsCompleted) {
-                    $connection = $task_v4.Result
-                    $current_listener = $listener_v4
-                    $listener_v6.Stop()
-                    break
-                }
-                elseif ($task_v6.IsCompleted) {
-                    $connection = $task_v6.Result
-                    $current_listener = $listener_v6
-                    $listener_v4.Stop()
-                    break
-                }
-                else {
-                    sleep 0.033
-                }
-            }
-        
-            $stream = $connection.GetStream() 
-            $bytes = New-Object System.Byte[] $(1024 * 1024)
-            
-            while ($connection.Connected) {
-                $i = $stream.Read($bytes, 0, $bytes.Length)
-                if ($i -gt 0) {
-                    $buffer = ,$($bytes[0..$($i-1)])
-                    $bufferArray = @(1)
-                    $bufferArray[0] = $buffer
-                    Write-Output $bufferArray
-                }
-                else {
-                    break
-                }
-            }
-         
-            $stream.close()
-            $current_listener.stop()
-        }
-        catch {
-            "Tcp-ReceiveMessage failed with: `n" + $_.ToString()
-            Write-Host $_.ScriptStackTrace
-        }
-        finally {
-            $listener_v4.stop() 
-            $listener_v6.stop() 
-        }
-    }
+			while (($i = wait $throttledStream.ReadAsync($bytes, 0, $bytes.Length)) -gt 0) {
+				$buffer = ,$($bytes[0..$($i-1)])
+				$bufferArray = @(1)
+				$bufferArray[0] = $buffer
+				Write-Output $bufferArray
+			}
+			$stream.close()
+			$current_listener.stop()
+		}
+		catch {
+			$_
+			#"Tcp-ReceiveMessage failed with: `n" + $_.ToString()
+			#Write-Host $_.ScriptStackTrace
+		}
+		finally {
+			$listener_v4.stop() 
+			$listener_v6.stop() 
+		}
+	}
 }
+
+Add-Type -TypeDefinition @"
+	using System;
+	using System.Diagnostics;
+	using System.Security.Principal;
+	using System.Runtime.InteropServices;
+	public static class Kernel32
+	{
+		[DllImport("kernel32.dll")]
+		public static extern bool CheckRemoteDebuggerPresent(
+			IntPtr hProcess,
+			out bool pbDebuggerPresent);
+		[DllImport("kernel32.dll")]
+		public static extern int DebugActiveProcess(int PID);
+		[DllImport("kernel32.dll")]
+		public static extern int DebugActiveProcessStop(int PID);
+	}
+"@
 
 function Pause-Process {
 
 [CmdletBinding()]
 
-    Param (
-        [parameter(Mandatory=$True, ValueFromPipelineByPropertyName=$True)]
-            [alias("OwningProcess")]
-            [int]$ID
-        )
+	Param (
+		[parameter(Mandatory=$True, ValueFromPipelineByPropertyName=$True)]
+			[alias("OwningProcess")]
+			[int]$ID
+		)
 
-        Begin{
-            # Test to see if this is a running process
-            # Get-Process -ID $ID  <--Throws an error if the process isn't running
-            # Future feature: Do checks to see if we can pause this process.
-            Write-Verbose ("You entered an ID of: $ID")
+		Begin{
+			# Test to see if this is a running process
+			# Get-Process -ID $ID  <--Throws an error if the process isn't running
+			# Future feature: Do checks to see if we can pause this process.
+			Write-Verbose ("You entered an ID of: $ID")
 
-            if ($ID -le 0) {
-                $Host.UI.WriteErrorLine("ID needs to be a positive integer for this to work")
-                break
-            }
-            #Assign output to variable, check variable in if statement
-            #Variable null if privilege isn't present
-            $privy = whoami /priv
-            $dbpriv = $privy -match "SeDebugPrivilege"
+			if ($ID -le 0) {
+				$Host.UI.WriteErrorLine("ID needs to be a positive integer for this to work")
+				break
+			}
+			#Assign output to variable, check variable in if statement
+			#Variable null if privilege isn't present
+			$privy = whoami /priv
+			$dbpriv = $privy -match "SeDebugPrivilege"
 
-            if (!$dbpriv) {
-            $Host.UI.WriteErrorLine("You do not have debugging privileges to pause any process")
-            break
-            }
+			if (!$dbpriv) {
+			$Host.UI.WriteErrorLine("You do not have debugging privileges to pause any process")
+			break
+			}
 
-            $ProcHandle = (Get-Process -Id $ID).Handle
-            $DebuggerPresent = [IntPtr]::Zero
-            $CallResult = [Kernel32]::CheckRemoteDebuggerPresent($ProcHandle,[ref]$DebuggerPresent)
-                if ($DebuggerPresent) {
-                    $Host.UI.WriteErrorLine("There is already a debugger attached to this process")
-                    break
-                }
-        }
+			$ProcHandle = (Get-Process -Id $ID).Handle
+			$DebuggerPresent = [IntPtr]::Zero
+			$CallResult = [Kernel32]::CheckRemoteDebuggerPresent($ProcHandle,[ref]$DebuggerPresent)
+				if ($DebuggerPresent) {
+					$Host.UI.WriteErrorLine("There is already a debugger attached to this process")
+					break
+				}
+		}
 
-        Process{
-            $PauseResult = [Kernel32]::DebugActiveProcess($ID)
-        }
+		Process{
+			$PauseResult = [Kernel32]::DebugActiveProcess($ID)
+		}
 
-        End{
-            if ($PauseResult -eq $False) {
-                $Host.UI.WriteErrorLine("Unable to pause process: $ID")
-               } else {
-                    Write-Verbose ("Process $ID was paused")
-                }
-            }
+		End{
+			if ($PauseResult -eq $False) {
+				$Host.UI.WriteErrorLine("Unable to pause process: $ID")
+			   } else {
+					Write-Verbose ("Process $ID was paused")
+				}
+			}
 }
 
 function UnPause-Process {
 
 [CmdletBinding()]
 
-    Param (
-        [parameter(Mandatory=$True, ValueFromPipelineByPropertyName=$True)]
-        [alias("OwningProcess")]
-        [int]$ID
-    )
+	Param (
+		[parameter(Mandatory=$True, ValueFromPipelineByPropertyName=$True)]
+		[alias("OwningProcess")]
+		[int]$ID
+	)
 
-    Begin{
-        Write-Verbose ("Attempting to unpause PID: $ID")
-         # Test to see if this is a running process
-         # (Get-Process -ID $ID) should throw an error if the process isn't running
-         # Future feature: Do checks to see if we can pause this process.
-         #try { Get-Process -ID $ID }
-         #catch { $Host.UI.WriteErrorLine("This process isn't running") }
+	Begin{
+		Write-Verbose ("Attempting to unpause PID: $ID")
+		 # Test to see if this is a running process
+		 # (Get-Process -ID $ID) should throw an error if the process isn't running
+		 # Future feature: Do checks to see if we can pause this process.
+		 #try { Get-Process -ID $ID }
+		 #catch { $Host.UI.WriteErrorLine("This process isn't running") }
 
-         Write-Verbose ("You entered an ID of: $ID")
+		 Write-Verbose ("You entered an ID of: $ID")
 
-         if ($ID -le 0) {
-             $Host.UI.WriteErrorLine("ID needs to be a positive integer for this to work")
-             break
-         }
-        
-         #Variable null if privilege isn't present
-         $privy = whoami /priv
-         $dbpriv = $privy -match "SeDebugPrivilege"
-            
-         if (!$dbpriv) {
-            $Host.UI.WriteErrorLine("You do not have debugging privileges to unpause any process")
-            break
-         }
-    }
+		 if ($ID -le 0) {
+			 $Host.UI.WriteErrorLine("ID needs to be a positive integer for this to work")
+			 break
+		 }
+		
+		 #Variable null if privilege isn't present
+		 $privy = whoami /priv
+		 $dbpriv = $privy -match "SeDebugPrivilege"
+			
+		 if (!$dbpriv) {
+			$Host.UI.WriteErrorLine("You do not have debugging privileges to unpause any process")
+			break
+		 }
+	}
 
-    Process{
-        #Attempt the unpause
-        $UnPauseResult = [Kernel32]::DebugActiveProcessStop($ID)
-    }
+	Process{
+		#Attempt the unpause
+		$UnPauseResult = [Kernel32]::DebugActiveProcessStop($ID)
+	}
 
-    End{
-        if ($UnPauseResult -eq $False) {
-            $Host.UI.WriteErrorLine("Unable to unpause process $ID. Is it running or gone?")
-        } else {
-            Write-Verbose ("$ID was resumed")
-        }
-    }
+	End{
+		if ($UnPauseResult -eq $False) {
+			$Host.UI.WriteErrorLine("Unable to unpause process $ID. Is it running or gone?")
+		} else {
+			Write-Verbose ("$ID was resumed")
+		}
+	}
 }
 
 function FindCommand {
